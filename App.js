@@ -22,62 +22,58 @@ export default function App() {
   const anchorRef = useRef(null);
   const ANCHOR_STORAGE_KEY = "hk_anchor_heartRate";
 
-  // const loadAnchor = async () => {
-  //   try {
-  //     const v = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
-  //     return v || null;
-  //   } catch (_e) {
-  //     return null;
-  //   }
-  // };
+  const loadAnchor = async () => {
+    try {
+      const v = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
+      return v || null;
+    } catch (_e) {
+      return null;
+    }
+  };
 
-  // const saveAnchor = async (anchor) => {
-  //   try {
-  //     if (anchor) {
-  //       await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, anchor);
-  //     }
-  //   } catch (_e) {}
-  // };
+  const saveAnchor = async (anchor) => {
+    try {
+      if (anchor) {
+        await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, anchor);
+      }
+    } catch (_e) {}
+  };
 
-  // const resetAnchor = async () => {
-  //   try {
-  //     anchorRef.current = null;
-  //     await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
-  //     console.log("🔁 Anchor reset. Next query will fetch from beginning.");
-  //   } catch (_e) {}
-  // };
+  const resetAnchor = async () => {
+    try {
+      anchorRef.current = null;
+      await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
+      console.log("🔁 Anchor reset. Next query will fetch from beginning.");
+    } catch (_e) {}
+  };
 
-  // // Anchor-based delta fetch
-  // const fetchHeartRateDeltas = async () => {
-  //   try {
-  //     const { newAnchor, samples } = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
-  //       limit: 0,
-  //       // anchor: anchorRef.current || undefined,
-  //       filter: {
-  //         from: new Date(Date.now() - 1000 * 60 * 60 * 24),
-  //       },
-  //     });
+  // Anchor-based delta fetch
+  const fetchHeartRateDeltas = async () => {
+    try {
+      const { newAnchor, samples } = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
+        limit: 0,
+        anchor: anchorRef.current || undefined,
+        filter: {
+          from: new Date(Date.now() - 1000 * 60 * 60 * 24),
+        },
+      });
 
-  //     if (newAnchor && newAnchor !== anchorRef.current) {
-  //       anchorRef.current = newAnchor;
-  //       await saveAnchor(newAnchor);
-  //     }
+      if (newAnchor && newAnchor !== anchorRef.current) {
+        anchorRef.current = newAnchor;
+        await saveAnchor(newAnchor);
+      }
 
-  //     if (samples && samples.length > 0) {
-  //       // Samples are returned newest-first in this lib; if not, sort by startDate desc
-  //       const latest = samples[samples.length - 1];
-  //       setHeartRate(latest);
-  //       console.log(
-  //         `📥 Received ${samples.length} new samples. Latest: ${latest.quantity} BPM at
-  //           ${latest.startDate}`
-  //       );
-  //     } else {
-  //       console.log("📭 No new samples since last anchor");
-  //     }
-  //   } catch (e) {
-  //     console.error("Anchor query failed:", e);
-  //   }
-  // };
+      if (samples && samples.length > 0) {
+        const latest = samples[samples.length - 1];
+        setHeartRate(latest);
+        console.log("📥 Received " + samples.length + " new samples. Latest: " + latest.quantity + " BPM at " + latest.startDate);
+      } else {
+        console.log("📭 No new samples since last anchor");
+      }
+    } catch (e) {
+      console.error("Anchor query failed:", e);
+    }
+  };
 
   // Request HealthKit permissions for heart rate
   const requestPermissions = async () => {
@@ -149,25 +145,25 @@ export default function App() {
     }
   };
 
-  // useEffect(() => {
-  //   let timer;
-  //   if (authStatus) {
-  //     timer = setInterval(() => fetchHeartRateDeltas(), 5000);
-  //   }
-  //   return () => clearInterval(timer);
-  // }, [authStatus]);
+  useEffect(() => {
+    let timer;
+    if (authStatus) {
+      timer = setInterval(() => fetchHeartRateDeltas(), 5000);
+    }
+    return () => clearInterval(timer);
+  }, [authStatus]);
 
   // One-shot: load persisted anchor after auth
-  // useEffect(() => {
-  //   (async () => {
-  //     if (!authStatus) return;
-  //     const stored = await loadAnchor();
-  //     anchorRef.current = stored;
-  //     console.log("🔗 Loaded anchor:", stored ? stored.substring(0, 12) + "..." : "<none>");
-  //     // Kick an initial delta fetch
-  //     fetchHeartRateDeltas();
-  //   })();
-  // }, [authStatus]);
+  useEffect(() => {
+    (async () => {
+      if (!authStatus) return;
+      const stored = await loadAnchor();
+      anchorRef.current = stored;
+      console.log("🔗 Loaded anchor:", stored ? stored.substring(0, 12) + "..." : "<none>");
+      // Kick an initial delta fetch
+      fetchHeartRateDeltas();
+    })();
+  }, [authStatus]);
 
   // Force sync with HealthKit (helps with Watch → iPhone sync delays)
   const forceSyncHealthKit = async () => {
@@ -270,8 +266,7 @@ export default function App() {
         // Now set up the subscription
         unsub = HealthKit.subscribeToChanges(heartRateType, () => {
           console.log("*** Heart rate data changed! Fetching deltas via anchor ***", new Date());
-          // fetchHeartRateDeltas();
-          getLatestHeartRate();
+          fetchHeartRateDeltas();
         });
         console.log("Subscription set up successfully");
 
