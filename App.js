@@ -343,8 +343,6 @@ export default function App() {
               disabled={loading}
               color="#8A2BE2"
             />
-
-            {/* <Button title="Reset Anchor" onPress={resetAnchor} disabled={loading} color="#B00020" /> */}
           </>
         )}
 
