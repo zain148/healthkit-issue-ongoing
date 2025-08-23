@@ -21,6 +21,7 @@ export default function App() {
   const [error, setError] = useState(null);
   const anchorRef = useRef(null);
   const ANCHOR_STORAGE_KEY = "hk_anchor_heartRate";
+  const isFetchingRef = useRef(false);
 
   // const loadAnchor = async () => {
   //   try {
@@ -78,6 +79,67 @@ export default function App() {
   //     console.error("Anchor query failed:", e);
   //   }
   // };
+  const loadAnchor = async () => {
+    try {
+      const value = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
+      return value || null;
+    } catch (_e) {
+      return null;
+    }
+  };
+
+  const saveAnchor = async (anchor) => {
+    try {
+      if (anchor) {
+        await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, String(anchor));
+      }
+    } catch (_e) {}
+  };
+
+  const resetAnchor = async () => {
+    try {
+      anchorRef.current = null;
+      await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
+      console.log("🔁 Anchor reset. Next query will fetch from beginning.");
+    } catch (_e) {}
+  };
+
+  // Anchor-based delta fetch using HKAnchoredObjectQuery under the hood
+  const fetchHeartRateDeltas = async () => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    try {
+      const result = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
+        anchor: anchorRef.current || undefined,
+      });
+
+      const newAnchor = result?.newAnchor ?? result?.anchor;
+      const samples = result?.samples ?? result?.results ?? [];
+
+      if (newAnchor && newAnchor !== anchorRef.current) {
+        anchorRef.current = newAnchor;
+        await saveAnchor(newAnchor);
+      }
+
+      if (Array.isArray(samples) && samples.length > 0) {
+        // Pick the latest by startDate to be safe
+        let latest = samples[0];
+        for (let i = 1; i < samples.length; i++) {
+          if (samples[i].startDate > latest.startDate) {
+            latest = samples[i];
+          }
+        }
+        setHeartRate(latest);
+        console.log(
+          `📥 Received ${samples.length} new samples. Latest: ${latest.quantity} BPM at ${latest.startDate}`
+        );
+      }
+    } catch (e) {
+      console.error("Anchor query failed:", e);
+    } finally {
+      isFetchingRef.current = false;
+    }
+  };
 
   // Request HealthKit permissions for heart rate
   const requestPermissions = async () => {
@@ -149,25 +211,32 @@ export default function App() {
     }
   };
 
-  // useEffect(() => {
-  //   let timer;
-  //   if (authStatus) {
-  //     timer = setInterval(() => fetchHeartRateDeltas(), 5000);
-  //   }
-  //   return () => clearInterval(timer);
-  // }, [authStatus]);
+  useEffect(() => {
+    let timer;
+    if (authStatus) {
+      timer = setInterval(() => {
+        fetchHeartRateDeltas();
+      }, 5000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [authStatus]);
 
   // One-shot: load persisted anchor after auth
-  // useEffect(() => {
-  //   (async () => {
-  //     if (!authStatus) return;
-  //     const stored = await loadAnchor();
-  //     anchorRef.current = stored;
-  //     console.log("🔗 Loaded anchor:", stored ? stored.substring(0, 12) + "..." : "<none>");
-  //     // Kick an initial delta fetch
-  //     fetchHeartRateDeltas();
-  //   })();
-  // }, [authStatus]);
+  useEffect(() => {
+    (async () => {
+      if (!authStatus) return;
+      const stored = await loadAnchor();
+      anchorRef.current = stored;
+      console.log(
+        "🔗 Loaded anchor:",
+        stored ? stored.substring(0, 12) + "..." : "<none>"
+      );
+      // Kick an initial delta fetch
+      await fetchHeartRateDeltas();
+    })();
+  }, [authStatus]);
 
   // Force sync with HealthKit (helps with Watch → iPhone sync delays)
   const forceSyncHealthKit = async () => {
@@ -269,9 +338,11 @@ export default function App() {
 
         // Now set up the subscription
         unsub = HealthKit.subscribeToChanges(heartRateType, () => {
-          console.log("*** Heart rate data changed! Fetching deltas via anchor ***", new Date());
-          // fetchHeartRateDeltas();
-          getLatestHeartRate();
+          console.log(
+            "*** Heart rate data changed! Fetching deltas via anchor ***",
+            new Date()
+          );
+          fetchHeartRateDeltas();
         });
         console.log("Subscription set up successfully");
 
@@ -284,9 +355,9 @@ export default function App() {
     })();
 
     return () => {
-      if (typeof unsub === "function") {
+      if (unsub && typeof unsub.remove === "function") {
         console.log("Cleaning up subscription...");
-        unsub();
+        unsub.remove();
       }
     };
   }, [authStatus]);
