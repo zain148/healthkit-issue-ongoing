@@ -7,6 +7,7 @@ import {
   SafeAreaView,
   ScrollView,
   ActivityIndicator,
+  AppState,
 } from "react-native";
 import { useEffect, useRef, useState } from "react";
 import * as HealthKit from "@kingstinct/react-native-healthkit";
@@ -19,65 +20,98 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [heartRate, setHeartRate] = useState(null);
   const [error, setError] = useState(null);
+  const [subscriptionStatus, setSubscriptionStatus] = useState("Not started");
+  const [lastUpdateTime, setLastUpdateTime] = useState(null);
   const anchorRef = useRef(null);
+  const subscriptionRef = useRef(null);
+  const observerQueryRef = useRef(null);
   const ANCHOR_STORAGE_KEY = "hk_anchor_heartRate";
 
-  // const loadAnchor = async () => {
-  //   try {
-  //     const v = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
-  //     return v || null;
-  //   } catch (_e) {
-  //     return null;
-  //   }
-  // };
+  const loadAnchor = async () => {
+    try {
+      const v = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
+      console.log("📎 Loaded anchor from storage:", v ? v.substring(0, 12) + "..." : "<none>");
+      return v || null;
+    } catch (_e) {
+      console.error("Error loading anchor:", _e);
+      return null;
+    }
+  };
 
-  // const saveAnchor = async (anchor) => {
-  //   try {
-  //     if (anchor) {
-  //       await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, anchor);
-  //     }
-  //   } catch (_e) {}
-  // };
+  const saveAnchor = async (anchor) => {
+    try {
+      if (anchor) {
+        await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, anchor);
+        console.log("💾 Saved anchor:", anchor.substring(0, 12) + "...");
+      }
+    } catch (_e) {
+      console.error("Error saving anchor:", _e);
+    }
+  };
 
-  // const resetAnchor = async () => {
-  //   try {
-  //     anchorRef.current = null;
-  //     await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
-  //     console.log("🔁 Anchor reset. Next query will fetch from beginning.");
-  //   } catch (_e) {}
-  // };
+  const resetAnchor = async () => {
+    try {
+      anchorRef.current = null;
+      await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
+      console.log("🔁 Anchor reset. Next query will fetch from beginning.");
+    } catch (_e) {
+      console.error("Error resetting anchor:", _e);
+    }
+  };
 
-  // // Anchor-based delta fetch
-  // const fetchHeartRateDeltas = async () => {
-  //   try {
-  //     const { newAnchor, samples } = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
-  //       limit: 0,
-  //       // anchor: anchorRef.current || undefined,
-  //       filter: {
-  //         from: new Date(Date.now() - 1000 * 60 * 60 * 24),
-  //       },
-  //     });
+  // Enhanced anchor-based delta fetch with better error handling
+  const fetchHeartRateDeltas = async () => {
+    try {
+      console.log("🔍 Fetching heart rate deltas with anchor:", anchorRef.current ? anchorRef.current.substring(0, 12) + "..." : "<none>");
+      
+      const { newAnchor, samples } = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
+        limit: 0, // Get all new samples
+        anchor: anchorRef.current || undefined,
+        filter: {
+          from: new Date(Date.now() - 1000 * 60 * 60 * 24), // Last 24 hours as fallback
+        },
+      });
 
-  //     if (newAnchor && newAnchor !== anchorRef.current) {
-  //       anchorRef.current = newAnchor;
-  //       await saveAnchor(newAnchor);
-  //     }
+      console.log(`📥 Delta query returned ${samples?.length || 0} samples`);
 
-  //     if (samples && samples.length > 0) {
-  //       // Samples are returned newest-first in this lib; if not, sort by startDate desc
-  //       const latest = samples[samples.length - 1];
-  //       setHeartRate(latest);
-  //       console.log(
-  //         `📥 Received ${samples.length} new samples. Latest: ${latest.quantity} BPM at
-  //           ${latest.startDate}`
-  //       );
-  //     } else {
-  //       console.log("📭 No new samples since last anchor");
-  //     }
-  //   } catch (e) {
-  //     console.error("Anchor query failed:", e);
-  //   }
-  // };
+      if (newAnchor && newAnchor !== anchorRef.current) {
+        anchorRef.current = newAnchor;
+        await saveAnchor(newAnchor);
+        console.log("🔗 Updated anchor to:", newAnchor.substring(0, 12) + "...");
+      }
+
+      if (samples && samples.length > 0) {
+        // Sort samples by start date to get the most recent
+        const sortedSamples = samples.sort((a, b) => new Date(b.startDate) - new Date(a.startDate));
+        const latest = sortedSamples[0];
+        
+        setHeartRate(latest);
+        setLastUpdateTime(new Date());
+        
+        console.log(
+          `💓 Received ${samples.length} new samples. Latest: ${latest.quantity} BPM at ${new Date(latest.startDate).toLocaleTimeString()}`
+        );
+        
+        // Log all samples for debugging
+        samples.forEach((sample, index) => {
+          console.log(`Sample ${index}: ${sample.quantity} BPM at ${new Date(sample.startDate).toLocaleTimeString()}`);
+        });
+      } else {
+        console.log("📭 No new samples since last anchor");
+      }
+    } catch (e) {
+      console.error("❌ Anchor query failed:", e);
+      setError("Delta fetch failed: " + e.message);
+      
+      // Fallback to regular query if anchor query fails
+      try {
+        console.log("🔄 Falling back to regular query...");
+        await getLatestHeartRate();
+      } catch (fallbackError) {
+        console.error("❌ Fallback query also failed:", fallbackError);
+      }
+    }
+  };
 
   // Request HealthKit permissions for heart rate
   const requestPermissions = async () => {
@@ -85,33 +119,32 @@ export default function App() {
       setLoading(true);
       setError(null);
 
-      // Use the string identifier directly (library exports types, not enums)
-
-      console.log("Using heart rate type:", heartRateType);
+      console.log("🔐 Requesting HealthKit permissions for:", heartRateType);
 
       // Request authorization for reading heart rate
       const authResult = await HealthKit.requestAuthorization([], [heartRateType]);
-      console.log("Authorization result:", authResult);
+      console.log("✅ Authorization result:", authResult);
 
       // Check if we actually got permission
       const authStatus = await HealthKit.getRequestStatusForAuthorization([], [heartRateType]);
-      console.log("Auth status:", authStatus);
+      console.log("📋 Auth status:", authStatus);
 
       // Try to read a sample to verify permissions
       try {
         const sample = await HealthKit.getMostRecentQuantitySample(heartRateType, "count/min");
-        console.log("Initial sample:", sample);
+        console.log("🔍 Initial sample:", sample);
         if (sample) {
           setHeartRate(sample);
+          setLastUpdateTime(new Date());
         }
       } catch (sampleError) {
-        console.log("Could not read initial sample:", sampleError.message);
+        console.log("⚠️ Could not read initial sample:", sampleError.message);
       }
 
       setAuthStatus(true);
       setLoading(false);
     } catch (err) {
-      console.error("Permission error:", err);
+      console.error("❌ Permission error:", err);
       setError("Failed to request permissions: " + err.message);
       setLoading(false);
     }
@@ -123,6 +156,8 @@ export default function App() {
       setLoading(true);
       setError(null);
 
+      console.log("🔍 Querying latest heart rate...");
+
       // Query the most recent heart rate sample
       const mostRecentHeartRate = await HealthKit.getMostRecentQuantitySample(
         heartRateType,
@@ -131,43 +166,24 @@ export default function App() {
 
       if (mostRecentHeartRate) {
         console.log(
-          "mostRecentHeartRate",
+          "💓 Most recent heart rate:",
           mostRecentHeartRate.quantity,
-          "at",
-          new Date(mostRecentHeartRate.startDate)
+          "BPM at",
+          new Date(mostRecentHeartRate.startDate).toLocaleString()
         );
         setHeartRate(mostRecentHeartRate);
+        setLastUpdateTime(new Date());
       } else {
-        console.log("No heart rate data found");
+        console.log("📭 No heart rate data found");
         setHeartRate(null);
       }
       setLoading(false);
     } catch (err) {
-      console.error("Error getting heart rate:", err);
+      console.error("❌ Error getting heart rate:", err);
       setError("Failed to get heart rate: " + err.message);
       setLoading(false);
     }
   };
-
-  // useEffect(() => {
-  //   let timer;
-  //   if (authStatus) {
-  //     timer = setInterval(() => fetchHeartRateDeltas(), 5000);
-  //   }
-  //   return () => clearInterval(timer);
-  // }, [authStatus]);
-
-  // One-shot: load persisted anchor after auth
-  // useEffect(() => {
-  //   (async () => {
-  //     if (!authStatus) return;
-  //     const stored = await loadAnchor();
-  //     anchorRef.current = stored;
-  //     console.log("🔗 Loaded anchor:", stored ? stored.substring(0, 12) + "..." : "<none>");
-  //     // Kick an initial delta fetch
-  //     fetchHeartRateDeltas();
-  //   })();
-  // }, [authStatus]);
 
   // Force sync with HealthKit (helps with Watch → iPhone sync delays)
   const forceSyncHealthKit = async () => {
@@ -250,44 +266,104 @@ export default function App() {
     checkAvailability();
   }, []);
 
+  // Enhanced HealthKit subscription with observer queries
+  const setupHealthKitSubscription = async () => {
+    try {
+      console.log("🔧 Setting up enhanced HealthKit subscription...");
+      setSubscriptionStatus("Setting up...");
+
+      // Clean up any existing subscription
+      if (subscriptionRef.current && typeof subscriptionRef.current === "function") {
+        console.log("🧹 Cleaning up existing subscription");
+        subscriptionRef.current();
+        subscriptionRef.current = null;
+      }
+
+      // Step 1: Enable background delivery with immediate frequency
+      console.log("🔧 Enabling background delivery...");
+      const bgDeliveryResult = await HealthKit.enableBackgroundDelivery(
+        heartRateType,
+        HealthKit.UpdateFrequency.immediate
+      );
+      console.log("✅ Background delivery result:", bgDeliveryResult);
+
+      // Step 2: Load persisted anchor
+      const storedAnchor = await loadAnchor();
+      anchorRef.current = storedAnchor;
+
+      // Step 3: Set up the subscription with enhanced callback
+      console.log("🔧 Setting up subscription callback...");
+      subscriptionRef.current = HealthKit.subscribeToChanges(heartRateType, (error) => {
+        const timestamp = new Date().toLocaleTimeString();
+        
+        if (error) {
+          console.error(`❌ [${timestamp}] Subscription error:`, error);
+          setError("Subscription error: " + error.message);
+          setSubscriptionStatus("Error: " + error.message);
+          return;
+        }
+
+        console.log(`🔔 [${timestamp}] Heart rate data changed! Fetching deltas...`);
+        setSubscriptionStatus(`Active - Last trigger: ${timestamp}`);
+        
+        // Use delta fetching for efficiency
+        fetchHeartRateDeltas();
+      });
+
+      console.log("✅ Subscription set up successfully");
+      setSubscriptionStatus("Active - Waiting for changes");
+
+      // Step 4: Get initial data using delta fetch
+      console.log("🔍 Fetching initial data...");
+      await fetchHeartRateDeltas();
+
+      return true;
+    } catch (error) {
+      console.error("❌ Error setting up HealthKit subscription:", error);
+      setError("Failed to set up heart rate monitoring: " + error.message);
+      setSubscriptionStatus("Failed: " + error.message);
+      return false;
+    }
+  };
+
+  // Handle app state changes to ensure subscription persists
   useEffect(() => {
-    let unsub = null;
-
-    (async () => {
-      if (!authStatus) return;
-
-      try {
-        console.log("Setting up background delivery...");
-
-        // CRITICAL: Enable background delivery FIRST before subscribing
-        const bgDeliveryResult = await HealthKit.enableBackgroundDelivery(
-          heartRateType,
-          HealthKit.UpdateFrequency.immediate
-        );
-        console.log("Background delivery result:", bgDeliveryResult);
-        console.log("Background delivery enabled --- Setting up subscription...");
-
-        // Now set up the subscription
-        unsub = HealthKit.subscribeToChanges(heartRateType, () => {
-          console.log("*** Heart rate data changed! Fetching deltas via anchor ***", new Date());
-          // fetchHeartRateDeltas();
-          getLatestHeartRate();
-        });
-        console.log("Subscription set up successfully");
-
-        // Get initial data
-        getLatestHeartRate();
-      } catch (error) {
-        console.error("Error setting up HealthKit subscription:", error);
-        setError("Failed to set up heart rate monitoring: " + error.message);
+    const handleAppStateChange = (nextAppState) => {
+      console.log(`📱 App state changed to: ${nextAppState}`);
+      
+      if (nextAppState === 'active' && authStatus) {
+        console.log("🔄 App became active, refreshing heart rate data...");
+        // Fetch latest data when app becomes active
+        setTimeout(() => {
+          fetchHeartRateDeltas();
+        }, 1000); // Small delay to ensure the app is fully active
       }
-    })();
+    };
 
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    
     return () => {
-      if (typeof unsub === "function") {
-        console.log("Cleaning up subscription...");
-        unsub();
+      subscription?.remove();
+    };
+  }, [authStatus]);
+
+  // Main subscription effect
+  useEffect(() => {
+    if (!authStatus) {
+      setSubscriptionStatus("Not authorized");
+      return;
+    }
+
+    setupHealthKitSubscription();
+
+    // Cleanup function
+    return () => {
+      if (subscriptionRef.current && typeof subscriptionRef.current === "function") {
+        console.log("🧹 Cleaning up subscription on unmount...");
+        subscriptionRef.current();
+        subscriptionRef.current = null;
       }
+      setSubscriptionStatus("Cleaned up");
     };
   }, [authStatus]);
 
@@ -318,10 +394,20 @@ export default function App() {
                 <Text style={styles.sourceText}>
                   Source: {heartRate.sourceRevision?.source?.name || "Unknown"}
                 </Text>
+                {lastUpdateTime && (
+                  <Text style={styles.updateText}>
+                    Last updated: {lastUpdateTime.toLocaleTimeString()}
+                  </Text>
+                )}
               </View>
             ) : (
               <Text style={styles.noData}>No heart rate data available</Text>
             )}
+
+            <View style={styles.statusContainer}>
+              <Text style={styles.statusLabel}>Subscription Status:</Text>
+              <Text style={styles.statusText}>{subscriptionStatus}</Text>
+            </View>
 
             <Button
               title="Refresh Heart Rate"
@@ -342,6 +428,16 @@ export default function App() {
               onPress={checkWatchStatus}
               disabled={loading}
               color="#8A2BE2"
+            />
+
+            <Button
+              title="Reset Anchor & Restart"
+              onPress={async () => {
+                await resetAnchor();
+                await setupHealthKitSubscription();
+              }}
+              disabled={loading}
+              color="#FF1744"
             />
           </>
         )}
@@ -396,6 +492,26 @@ const styles = StyleSheet.create({
     marginTop: 5,
     color: "#666",
     fontStyle: "italic",
+  },
+  updateText: {
+    marginTop: 5,
+    color: "#008000",
+    fontSize: 12,
+  },
+  statusContainer: {
+    marginVertical: 15,
+    padding: 10,
+    backgroundColor: "#e8f4f8",
+    borderRadius: 8,
+    width: "100%",
+  },
+  statusLabel: {
+    fontWeight: "bold",
+    marginBottom: 5,
+  },
+  statusText: {
+    color: "#2196F3",
+    fontSize: 12,
   },
   noData: {
     fontSize: 16,
