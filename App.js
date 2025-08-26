@@ -7,77 +7,23 @@ import {
   SafeAreaView,
   ScrollView,
   ActivityIndicator,
+  AppState,
 } from "react-native";
 import { useEffect, useRef, useState } from "react";
 import * as HealthKit from "@kingstinct/react-native-healthkit";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const heartRateType = "HKQuantityTypeIdentifierHeartRate";
+const heartRateType =
+  /*"HKQuantityTypeIdentifierVO2Max";*/ "HKQuantityTypeIdentifierWalkingHeartRateAverage";
 
 export default function App() {
   const [authStatus, setAuthStatus] = useState(false);
   const [loading, setLoading] = useState(false);
   const [heartRate, setHeartRate] = useState(null);
   const [error, setError] = useState(null);
-  const anchorRef = useRef(null);
-  const ANCHOR_STORAGE_KEY = "hk_anchor_heartRate";
-
-  // const loadAnchor = async () => {
-  //   try {
-  //     const v = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
-  //     return v || null;
-  //   } catch (_e) {
-  //     return null;
-  //   }
-  // };
-
-  // const saveAnchor = async (anchor) => {
-  //   try {
-  //     if (anchor) {
-  //       await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, anchor);
-  //     }
-  //   } catch (_e) {}
-  // };
-
-  // const resetAnchor = async () => {
-  //   try {
-  //     anchorRef.current = null;
-  //     await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
-  //     console.log("🔁 Anchor reset. Next query will fetch from beginning.");
-  //   } catch (_e) {}
-  // };
-
-  // // Anchor-based delta fetch
-  // const fetchHeartRateDeltas = async () => {
-  //   try {
-  //     const { newAnchor, samples } = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
-  //       limit: 0,
-  //       // anchor: anchorRef.current || undefined,
-  //       filter: {
-  //         from: new Date(Date.now() - 1000 * 60 * 60 * 24),
-  //       },
-  //     });
-
-  //     if (newAnchor && newAnchor !== anchorRef.current) {
-  //       anchorRef.current = newAnchor;
-  //       await saveAnchor(newAnchor);
-  //     }
-
-  //     if (samples && samples.length > 0) {
-  //       // Samples are returned newest-first in this lib; if not, sort by startDate desc
-  //       const latest = samples[samples.length - 1];
-  //       setHeartRate(latest);
-  //       console.log(
-  //         `📥 Received ${samples.length} new samples. Latest: ${latest.quantity} BPM at
-  //           ${latest.startDate}`
-  //       );
-  //     } else {
-  //       console.log("📭 No new samples since last anchor");
-  //     }
-  //   } catch (e) {
-  //     console.error("Anchor query failed:", e);
-  //   }
-  // };
+  const [subscriptionActive, setSubscriptionActive] = useState(false);
+  const [lastUpdateTime, setLastUpdateTime] = useState(null);
+  const pollingIntervalRef = useRef(null);
+  const appStateRef = useRef(AppState.currentState);
 
   // Request HealthKit permissions for heart rate
   const requestPermissions = async () => {
@@ -99,7 +45,10 @@ export default function App() {
 
       // Try to read a sample to verify permissions
       try {
-        const sample = await HealthKit.getMostRecentQuantitySample(heartRateType, "count/min");
+        const sample = await HealthKit.getMostRecentQuantitySample(
+          heartRateType
+          // "count/min"
+        );
         console.log("Initial sample:", sample);
         if (sample) {
           setHeartRate(sample);
@@ -125,18 +74,31 @@ export default function App() {
 
       // Query the most recent heart rate sample
       const mostRecentHeartRate = await HealthKit.getMostRecentQuantitySample(
-        heartRateType,
-        "count/min"
+        heartRateType
+        // "count/min"
       );
 
       if (mostRecentHeartRate) {
-        console.log(
-          "mostRecentHeartRate",
-          mostRecentHeartRate.quantity,
-          "at",
-          new Date(mostRecentHeartRate.startDate)
-        );
-        setHeartRate(mostRecentHeartRate);
+        const sampleDate = new Date(mostRecentHeartRate.startDate);
+
+        // Check if this is actually new data
+        if (lastUpdateTime && sampleDate.getTime() === lastUpdateTime.getTime()) {
+          console.log("⏸️ No new data since last update");
+        } else {
+          console.log(
+            "💓 New heart rate:",
+            mostRecentHeartRate.quantity,
+            "BPM at",
+            sampleDate.toLocaleString()
+          );
+          setHeartRate(mostRecentHeartRate);
+          setLastUpdateTime(sampleDate);
+
+          // If we're getting updates, mark subscription as active
+          if (!subscriptionActive) {
+            setSubscriptionActive(true);
+          }
+        }
       } else {
         console.log("No heart rate data found");
         setHeartRate(null);
@@ -148,26 +110,6 @@ export default function App() {
       setLoading(false);
     }
   };
-
-  // useEffect(() => {
-  //   let timer;
-  //   if (authStatus) {
-  //     timer = setInterval(() => fetchHeartRateDeltas(), 5000);
-  //   }
-  //   return () => clearInterval(timer);
-  // }, [authStatus]);
-
-  // One-shot: load persisted anchor after auth
-  // useEffect(() => {
-  //   (async () => {
-  //     if (!authStatus) return;
-  //     const stored = await loadAnchor();
-  //     anchorRef.current = stored;
-  //     console.log("🔗 Loaded anchor:", stored ? stored.substring(0, 12) + "..." : "<none>");
-  //     // Kick an initial delta fetch
-  //     fetchHeartRateDeltas();
-  //   })();
-  // }, [authStatus]);
 
   // Force sync with HealthKit (helps with Watch → iPhone sync delays)
   const forceSyncHealthKit = async () => {
@@ -252,6 +194,7 @@ export default function App() {
 
   useEffect(() => {
     let unsub = null;
+    let subscriptionTimeout = null;
 
     (async () => {
       if (!authStatus) return;
@@ -264,22 +207,42 @@ export default function App() {
           heartRateType,
           HealthKit.UpdateFrequency.immediate
         );
-        console.log("Background delivery result:", bgDeliveryResult);
-        console.log("Background delivery enabled --- Setting up subscription...");
+        console.log("🔄 Background delivery result:", bgDeliveryResult);
+        console.log("🔄 Background delivery enabled --- Setting up subscription...");
 
         // Now set up the subscription
         unsub = HealthKit.subscribeToChanges(heartRateType, () => {
-          console.log("*** Heart rate data changed! Fetching deltas via anchor ***", new Date());
-          // fetchHeartRateDeltas();
+          console.log(
+            "🔄 Subscription Event: Heart rate data changed! Fetching deltas via anchor",
+            new Date()
+          );
+          setSubscriptionActive(true);
           getLatestHeartRate();
+
+          // Reset the fallback timeout since subscription is working
+          if (subscriptionTimeout) {
+            clearTimeout(subscriptionTimeout);
+          }
         });
         console.log("Subscription set up successfully");
 
         // Get initial data
         getLatestHeartRate();
+
+        // Set up fallback polling after 10 seconds if no subscription updates
+        subscriptionTimeout = setTimeout(() => {
+          if (!subscriptionActive) {
+            console.log("⚠️ Subscription doesn't seem to be working, starting fallback polling...");
+            startIntelligentPolling();
+          }
+        }, 10000);
       } catch (error) {
         console.error("Error setting up HealthKit subscription:", error);
         setError("Failed to set up heart rate monitoring: " + error.message);
+
+        // If subscription setup fails, start polling as fallback
+        console.log("📊 Starting fallback polling due to subscription error");
+        startIntelligentPolling();
       }
     })();
 
@@ -288,8 +251,76 @@ export default function App() {
         console.log("Cleaning up subscription...");
         unsub();
       }
+      if (subscriptionTimeout) {
+        clearTimeout(subscriptionTimeout);
+      }
+      stopPolling();
     };
   }, [authStatus]);
+
+  // Monitor app state changes
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextAppState) => {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === "active") {
+        console.log("App has come to the foreground!");
+        // Immediately fetch latest data when coming to foreground
+        if (authStatus) {
+          getLatestHeartRate();
+        }
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [authStatus]);
+
+  // Intelligent polling mechanism
+  const startIntelligentPolling = () => {
+    // Clear any existing interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+    }
+
+    // Start with aggressive polling (every 5 seconds for first minute)
+    let pollCount = 0;
+    const maxAggressivePolls = 12; // 1 minute of 5-second intervals
+
+    const poll = () => {
+      if (appStateRef.current === "active") {
+        console.log(`📊 Polling for heart rate data (poll #${pollCount + 1})`);
+        getLatestHeartRate();
+
+        pollCount++;
+
+        // After initial aggressive period, switch to less frequent polling
+        if (pollCount === maxAggressivePolls) {
+          clearInterval(pollingIntervalRef.current);
+          // Switch to 30-second intervals
+          pollingIntervalRef.current = setInterval(() => {
+            if (appStateRef.current === "active") {
+              console.log("📊 Regular polling for heart rate data");
+              getLatestHeartRate();
+            }
+          }, 30000);
+        }
+      }
+    };
+
+    // Start aggressive polling
+    pollingIntervalRef.current = setInterval(poll, 5000);
+    // Do first poll immediately
+    poll();
+  };
+
+  // Stop polling
+  const stopPolling = () => {
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -305,6 +336,20 @@ export default function App() {
         ) : (
           <>
             <Text style={styles.subtitle}>Heart Rate Data</Text>
+
+            {/* Subscription Status Indicator */}
+            <View style={styles.statusContainer}>
+              <View
+                style={[
+                  styles.statusIndicator,
+                  { backgroundColor: subscriptionActive ? "#4CAF50" : "#FFC107" },
+                ]}
+              />
+              <Text style={styles.statusText}>
+                {subscriptionActive ? "Live Updates Active" : "Polling Mode (Subscription Issue)"}
+              </Text>
+            </View>
+
             {loading ? (
               <ActivityIndicator size="large" color="#0000ff" />
             ) : heartRate ? (
@@ -318,6 +363,18 @@ export default function App() {
                 <Text style={styles.sourceText}>
                   Source: {heartRate.sourceRevision?.source?.name || "Unknown"}
                 </Text>
+                {lastUpdateTime && (
+                  <Text style={styles.updateText}>
+                    Last Update:{" "}
+                    {new Date().getTime() - lastUpdateTime.getTime() < 60000
+                      ? `${Math.floor(
+                          (new Date().getTime() - lastUpdateTime.getTime()) / 1000
+                        )}s ago`
+                      : `${Math.floor(
+                          (new Date().getTime() - lastUpdateTime.getTime()) / 60000
+                        )}m ago`}
+                  </Text>
+                )}
               </View>
             ) : (
               <Text style={styles.noData}>No heart rate data available</Text>
@@ -342,6 +399,21 @@ export default function App() {
               onPress={checkWatchStatus}
               disabled={loading}
               color="#8A2BE2"
+            />
+
+            <Button
+              title={pollingIntervalRef.current ? "Stop Polling" : "Start Manual Polling"}
+              onPress={() => {
+                if (pollingIntervalRef.current) {
+                  console.log("🛑 Stopping manual polling");
+                  stopPolling();
+                } else {
+                  console.log("▶️ Starting manual polling");
+                  startIntelligentPolling();
+                }
+              }}
+              disabled={loading}
+              color="#FF9800"
             />
           </>
         )}
@@ -410,5 +482,26 @@ const styles = StyleSheet.create({
     color: "red",
     marginTop: 20,
     textAlign: "center",
+  },
+  statusContainer: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 15,
+    paddingHorizontal: 20,
+  },
+  statusIndicator: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 8,
+  },
+  statusText: {
+    fontSize: 14,
+    color: "#666",
+  },
+  updateText: {
+    fontSize: 12,
+    color: "#888",
+    marginTop: 5,
   },
 });

@@ -11,9 +11,9 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-    "newArchEnabled": false,
+    "newArchEnabled": true,
     "ios": {
-      "newArchEnabled": false,
+      "newArchEnabled": true,
       "supportsTablet": true,
       "bundleIdentifier": "com.perzimo.zero",
       "appleTeamId": "2873NNM7WH",
