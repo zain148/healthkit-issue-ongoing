@@ -11,9 +11,9 @@ import {
 } from "react-native";
 import { useEffect, useRef, useState } from "react";
 import * as HealthKit from "@kingstinct/react-native-healthkit";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const heartRateType = "HKQuantityTypeIdentifierHeartRate";
+const heartRateType =
+  /*"HKQuantityTypeIdentifierVO2Max";*/ "HKQuantityTypeIdentifierWalkingHeartRateAverage";
 
 export default function App() {
   const [authStatus, setAuthStatus] = useState(false);
@@ -22,67 +22,8 @@ export default function App() {
   const [error, setError] = useState(null);
   const [subscriptionActive, setSubscriptionActive] = useState(false);
   const [lastUpdateTime, setLastUpdateTime] = useState(null);
-  const anchorRef = useRef(null);
   const pollingIntervalRef = useRef(null);
   const appStateRef = useRef(AppState.currentState);
-  const ANCHOR_STORAGE_KEY = "hk_anchor_heartRate";
-
-  // const loadAnchor = async () => {
-  //   try {
-  //     const v = await AsyncStorage.getItem(ANCHOR_STORAGE_KEY);
-  //     return v || null;
-  //   } catch (_e) {
-  //     return null;
-  //   }
-  // };
-
-  // const saveAnchor = async (anchor) => {
-  //   try {
-  //     if (anchor) {
-  //       await AsyncStorage.setItem(ANCHOR_STORAGE_KEY, anchor);
-  //     }
-  //   } catch (_e) {}
-  // };
-
-  // const resetAnchor = async () => {
-  //   try {
-  //     anchorRef.current = null;
-  //     await AsyncStorage.removeItem(ANCHOR_STORAGE_KEY);
-  //     console.log("🔁 Anchor reset. Next query will fetch from beginning.");
-  //   } catch (_e) {}
-  // };
-
-  // // Anchor-based delta fetch
-  // const fetchHeartRateDeltas = async () => {
-  //   try {
-  //     const { newAnchor, samples } = await HealthKit.queryQuantitySamplesWithAnchor(heartRateType, {
-  //       limit: 0,
-  //       // anchor: anchorRef.current || undefined,
-  //       filter: {
-  //         from: new Date(Date.now() - 1000 * 60 * 60 * 24),
-  //       },
-  //     });
-
-  //     if (newAnchor && newAnchor !== anchorRef.current) {
-  //       anchorRef.current = newAnchor;
-  //       await saveAnchor(newAnchor);
-  //     }
-
-  //     if (samples && samples.length > 0) {
-  //       // Samples are returned newest-first in this lib; if not, sort by startDate desc
-  //       const latest = samples[samples.length - 1];
-  //       setHeartRate(latest);
-  //       console.log(
-  //         `📥 Received ${samples.length} new samples. Latest: ${latest.quantity} BPM at
-  //           ${latest.startDate}`
-  //       );
-  //     } else {
-  //       console.log("📭 No new samples since last anchor");
-  //     }
-  //   } catch (e) {
-  //     console.error("Anchor query failed:", e);
-  //   }
-  // };
 
   // Request HealthKit permissions for heart rate
   const requestPermissions = async () => {
@@ -104,7 +45,10 @@ export default function App() {
 
       // Try to read a sample to verify permissions
       try {
-        const sample = await HealthKit.getMostRecentQuantitySample(heartRateType, "count/min");
+        const sample = await HealthKit.getMostRecentQuantitySample(
+          heartRateType
+          // "count/min"
+        );
         console.log("Initial sample:", sample);
         if (sample) {
           setHeartRate(sample);
@@ -130,13 +74,13 @@ export default function App() {
 
       // Query the most recent heart rate sample
       const mostRecentHeartRate = await HealthKit.getMostRecentQuantitySample(
-        heartRateType,
-        "count/min"
+        heartRateType
+        // "count/min"
       );
 
       if (mostRecentHeartRate) {
         const sampleDate = new Date(mostRecentHeartRate.startDate);
-        
+
         // Check if this is actually new data
         if (lastUpdateTime && sampleDate.getTime() === lastUpdateTime.getTime()) {
           console.log("⏸️ No new data since last update");
@@ -149,7 +93,7 @@ export default function App() {
           );
           setHeartRate(mostRecentHeartRate);
           setLastUpdateTime(sampleDate);
-          
+
           // If we're getting updates, mark subscription as active
           if (!subscriptionActive) {
             setSubscriptionActive(true);
@@ -166,26 +110,6 @@ export default function App() {
       setLoading(false);
     }
   };
-
-  // useEffect(() => {
-  //   let timer;
-  //   if (authStatus) {
-  //     timer = setInterval(() => fetchHeartRateDeltas(), 5000);
-  //   }
-  //   return () => clearInterval(timer);
-  // }, [authStatus]);
-
-  // One-shot: load persisted anchor after auth
-  // useEffect(() => {
-  //   (async () => {
-  //     if (!authStatus) return;
-  //     const stored = await loadAnchor();
-  //     anchorRef.current = stored;
-  //     console.log("🔗 Loaded anchor:", stored ? stored.substring(0, 12) + "..." : "<none>");
-  //     // Kick an initial delta fetch
-  //     fetchHeartRateDeltas();
-  //   })();
-  // }, [authStatus]);
 
   // Force sync with HealthKit (helps with Watch → iPhone sync delays)
   const forceSyncHealthKit = async () => {
@@ -283,15 +207,18 @@ export default function App() {
           heartRateType,
           HealthKit.UpdateFrequency.immediate
         );
-        console.log("Background delivery result:", bgDeliveryResult);
-        console.log("Background delivery enabled --- Setting up subscription...");
+        console.log("🔄 Background delivery result:", bgDeliveryResult);
+        console.log("🔄 Background delivery enabled --- Setting up subscription...");
 
         // Now set up the subscription
         unsub = HealthKit.subscribeToChanges(heartRateType, () => {
-          console.log("*** Heart rate data changed! Fetching deltas via anchor ***", new Date());
+          console.log(
+            "🔄 Subscription Event: Heart rate data changed! Fetching deltas via anchor",
+            new Date()
+          );
           setSubscriptionActive(true);
           getLatestHeartRate();
-          
+
           // Reset the fallback timeout since subscription is working
           if (subscriptionTimeout) {
             clearTimeout(subscriptionTimeout);
@@ -301,7 +228,7 @@ export default function App() {
 
         // Get initial data
         getLatestHeartRate();
-        
+
         // Set up fallback polling after 10 seconds if no subscription updates
         subscriptionTimeout = setTimeout(() => {
           if (!subscriptionActive) {
@@ -312,7 +239,7 @@ export default function App() {
       } catch (error) {
         console.error("Error setting up HealthKit subscription:", error);
         setError("Failed to set up heart rate monitoring: " + error.message);
-        
+
         // If subscription setup fails, start polling as fallback
         console.log("📊 Starting fallback polling due to subscription error");
         startIntelligentPolling();
@@ -334,10 +261,7 @@ export default function App() {
   // Monitor app state changes
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextAppState) => {
-      if (
-        appStateRef.current.match(/inactive|background/) &&
-        nextAppState === "active"
-      ) {
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === "active") {
         console.log("App has come to the foreground!");
         // Immediately fetch latest data when coming to foreground
         if (authStatus) {
@@ -362,14 +286,14 @@ export default function App() {
     // Start with aggressive polling (every 5 seconds for first minute)
     let pollCount = 0;
     const maxAggressivePolls = 12; // 1 minute of 5-second intervals
-    
+
     const poll = () => {
       if (appStateRef.current === "active") {
         console.log(`📊 Polling for heart rate data (poll #${pollCount + 1})`);
         getLatestHeartRate();
-        
+
         pollCount++;
-        
+
         // After initial aggressive period, switch to less frequent polling
         if (pollCount === maxAggressivePolls) {
           clearInterval(pollingIntervalRef.current);
@@ -412,15 +336,20 @@ export default function App() {
         ) : (
           <>
             <Text style={styles.subtitle}>Heart Rate Data</Text>
-            
+
             {/* Subscription Status Indicator */}
             <View style={styles.statusContainer}>
-              <View style={[styles.statusIndicator, { backgroundColor: subscriptionActive ? '#4CAF50' : '#FFC107' }]} />
+              <View
+                style={[
+                  styles.statusIndicator,
+                  { backgroundColor: subscriptionActive ? "#4CAF50" : "#FFC107" },
+                ]}
+              />
               <Text style={styles.statusText}>
-                {subscriptionActive ? 'Live Updates Active' : 'Polling Mode (Subscription Issue)'}
+                {subscriptionActive ? "Live Updates Active" : "Polling Mode (Subscription Issue)"}
               </Text>
             </View>
-            
+
             {loading ? (
               <ActivityIndicator size="large" color="#0000ff" />
             ) : heartRate ? (
@@ -436,10 +365,14 @@ export default function App() {
                 </Text>
                 {lastUpdateTime && (
                   <Text style={styles.updateText}>
-                    Last Update: {new Date().getTime() - lastUpdateTime.getTime() < 60000 
-                      ? `${Math.floor((new Date().getTime() - lastUpdateTime.getTime()) / 1000)}s ago`
-                      : `${Math.floor((new Date().getTime() - lastUpdateTime.getTime()) / 60000)}m ago`
-                    }
+                    Last Update:{" "}
+                    {new Date().getTime() - lastUpdateTime.getTime() < 60000
+                      ? `${Math.floor(
+                          (new Date().getTime() - lastUpdateTime.getTime()) / 1000
+                        )}s ago`
+                      : `${Math.floor(
+                          (new Date().getTime() - lastUpdateTime.getTime()) / 60000
+                        )}m ago`}
                   </Text>
                 )}
               </View>
@@ -467,7 +400,7 @@ export default function App() {
               disabled={loading}
               color="#8A2BE2"
             />
-            
+
             <Button
               title={pollingIntervalRef.current ? "Stop Polling" : "Start Manual Polling"}
               onPress={() => {
