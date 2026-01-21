@@ -11,14 +11,17 @@
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
-    "newArchEnabled": true,
+    "newArchEnabled": false,
     "ios": {
-      "newArchEnabled": true,
+      "newArchEnabled": false,
       "supportsTablet": true,
       "bundleIdentifier": "com.perzimo.zero",
       "appleTeamId": "2873NNM7WH",
       "entitlements": {
         "com.apple.developer.healthkit": true
+      },
+      "infoPlist":{
+        "UIBackgroundModes": ["fetch", "processing"]
       }
     },
     "android": {

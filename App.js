@@ -1,4 +1,13 @@
-import { StatusBar } from "expo-status-bar";
+/**
+ * App.js - MVP Heart Rate & Calories Monitor
+ * 
+ * Features:
+ * - Live Heart Rate updates
+ * - Calories tracking (Active Energy)
+ * - Last 5 workout activities with HR & Calories summary
+ */
+
+import { StatusBar } from 'expo-status-bar';
 import {
   StyleSheet,
   Text,
@@ -6,419 +15,314 @@ import {
   Button,
   SafeAreaView,
   ScrollView,
+  Platform,
   ActivityIndicator,
-  AppState,
-} from "react-native";
-import { useEffect, useRef, useState } from "react";
-import * as HealthKit from "@kingstinct/react-native-healthkit";
-
-const heartRateType =
-  /*"HKQuantityTypeIdentifierVO2Max";*/ "HKQuantityTypeIdentifierWalkingHeartRateAverage";
+  RefreshControl,
+} from 'react-native';
+import { useCallback, useState } from 'react';
+import { 
+  useHealthKitStore, 
+  healthKitStore, 
+  HEART_RATE_TYPE,
+  ACTIVE_ENERGY_TYPE,
+  parseHealthKitDate,
+} from './src/HealthKitSetup';
+import * as HealthKit from '@kingstinct/react-native-healthkit';
 
 export default function App() {
-  const [authStatus, setAuthStatus] = useState(false);
+  const healthState = useHealthKitStore();
+  const { 
+    heartRate, 
+    lastHeartRateUpdate, 
+    activeCalories,
+    lastCaloriesUpdate,
+    recentActivities,
+    subscriptionActive, 
+    isAuthorized, 
+    error, 
+    updateCount 
+  } = healthState;
+
   const [loading, setLoading] = useState(false);
-  const [heartRate, setHeartRate] = useState(null);
-  const [error, setError] = useState(null);
-  const [subscriptionActive, setSubscriptionActive] = useState(false);
-  const [lastUpdateTime, setLastUpdateTime] = useState(null);
-  const pollingIntervalRef = useRef(null);
-  const appStateRef = useRef(AppState.currentState);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
 
-  // Request HealthKit permissions for heart rate
-  const requestPermissions = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      // Use the string identifier directly (library exports types, not enums)
-
-      console.log("Using heart rate type:", heartRateType);
-
-      // Request authorization for reading heart rate
-      const authResult = await HealthKit.requestAuthorization([], [heartRateType]);
-      console.log("Authorization result:", authResult);
-
-      // Check if we actually got permission
-      const authStatus = await HealthKit.getRequestStatusForAuthorization([], [heartRateType]);
-      console.log("Auth status:", authStatus);
-
-      // Try to read a sample to verify permissions
-      try {
-        const sample = await HealthKit.getMostRecentQuantitySample(
-          heartRateType
-          // "count/min"
-        );
-        console.log("Initial sample:", sample);
-        if (sample) {
-          setHeartRate(sample);
-        }
-      } catch (sampleError) {
-        console.log("Could not read initial sample:", sampleError.message);
-      }
-
-      setAuthStatus(true);
-      setLoading(false);
-    } catch (err) {
-      console.error("Permission error:", err);
-      setError("Failed to request permissions: " + err.message);
-      setLoading(false);
-    }
-  };
-
-  // Get the latest heart rate data
-  const getLatestHeartRate = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      // Query the most recent heart rate sample
-      const mostRecentHeartRate = await HealthKit.getMostRecentQuantitySample(
-        heartRateType
-        // "count/min"
-      );
-
-      if (mostRecentHeartRate) {
-        const sampleDate = new Date(mostRecentHeartRate.startDate);
-
-        // Check if this is actually new data
-        if (lastUpdateTime && sampleDate.getTime() === lastUpdateTime.getTime()) {
-          console.log("⏸️ No new data since last update");
-        } else {
-          console.log(
-            "💓 New heart rate:",
-            mostRecentHeartRate.quantity,
-            "BPM at",
-            sampleDate.toLocaleString()
-          );
-          setHeartRate(mostRecentHeartRate);
-          setLastUpdateTime(sampleDate);
-
-          // If we're getting updates, mark subscription as active
-          if (!subscriptionActive) {
-            setSubscriptionActive(true);
-          }
-        }
-      } else {
-        console.log("No heart rate data found");
-        setHeartRate(null);
-      }
-      setLoading(false);
-    } catch (err) {
-      console.error("Error getting heart rate:", err);
-      setError("Failed to get heart rate: " + err.message);
-      setLoading(false);
-    }
-  };
-
-  // Force sync with HealthKit (helps with Watch → iPhone sync delays)
-  const forceSyncHealthKit = async () => {
-    try {
-      console.log("🔄 Forcing HealthKit sync...");
-      setLoading(true);
-
-      // Query multiple recent samples to force a sync
-      const samples = await HealthKit.queryQuantitySamples(heartRateType, {
-        limit: 10, // Get last 10 samples
-        from: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
-      });
-
-      console.log(`📊 Found ${samples?.samples?.length || 0} heart rate samples in last 24h`);
-
-      if (samples?.samples?.length > 0) {
-        // Show all recent samples for debugging
-        samples.samples.forEach((sample, index) => {
-          console.log(
-            `Sample ${index}: ${sample.quantity} BPM at ${new Date(
-              sample.startDate
-            ).toLocaleTimeString()}`
-          );
-        });
-
-        const latest = samples.samples[0];
-        console.log(
-          "✅ Latest from sync:",
-          latest.quantity,
-          "BPM at",
-          new Date(latest.startDate).toLocaleString()
-        );
-        setHeartRate(latest);
-      } else {
-        console.log("⚠️ No heart rate samples found in last 24 hours");
-        setError("No recent heart rate data found. Start a workout on your Apple Watch.");
-      }
-
-      setLoading(false);
-    } catch (err) {
-      console.error("❌ Error syncing HealthKit:", err);
-      setError("Sync failed: " + err.message);
-      setLoading(false);
-    }
-  };
-
-  // Check Watch connectivity and sync status
-  const checkWatchStatus = async () => {
-    try {
-      console.log("🔍 Checking HealthKit data sources...");
-
-      // Get sources to see if Watch is contributing data
-      const samples = await HealthKit.queryQuantitySamples(heartRateType, { limit: 5 });
-
-      if (samples?.samples?.length > 0) {
-        samples.samples.forEach((sample) => {
-          const source = sample.sourceRevision?.source?.name || "Unknown";
-          const device = sample.device?.name || "Unknown device";
-          console.log(`📱 Source: ${source}, Device: ${device}`);
-        });
-      }
-    } catch (err) {
-      console.error("Error checking sources:", err);
-    }
-  };
-
-  // Check if HealthKit is available when component mounts
-  useEffect(() => {
-    const checkAvailability = async () => {
-      try {
-        const isAvailable = await HealthKit.isHealthDataAvailable();
-        if (!isAvailable) {
-          setError("HealthKit is not available on this device");
-        }
-      } catch (err) {
-        setError("Error checking HealthKit availability: " + err.message);
-      }
-    };
-
-    checkAvailability();
+  // Pull to refresh
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await healthKitStore.refresh();
+    setRefreshing(false);
   }, []);
 
-  useEffect(() => {
-    let unsub = null;
-    let subscriptionTimeout = null;
+  // Manual refresh
+  const handleRefresh = useCallback(async () => {
+    setLoading(true);
+    await healthKitStore.refresh();
+    setLoading(false);
+  }, []);
 
-    (async () => {
-      if (!authStatus) return;
-
-      try {
-        console.log("Setting up background delivery...");
-
-        // CRITICAL: Enable background delivery FIRST before subscribing
-        const bgDeliveryResult = await HealthKit.enableBackgroundDelivery(
-          heartRateType,
-          HealthKit.UpdateFrequency.immediate
-        );
-        console.log("🔄 Background delivery result:", bgDeliveryResult);
-        console.log("🔄 Background delivery enabled --- Setting up subscription...");
-
-        // Now set up the subscription
-        unsub = HealthKit.subscribeToChanges(heartRateType, () => {
-          console.log(
-            "🔄 Subscription Event: Heart rate data changed! Fetching deltas via anchor",
-            new Date()
-          );
-          setSubscriptionActive(true);
-          getLatestHeartRate();
-
-          // Reset the fallback timeout since subscription is working
-          if (subscriptionTimeout) {
-            clearTimeout(subscriptionTimeout);
-          }
-        });
-        console.log("Subscription set up successfully");
-
-        // Get initial data
-        getLatestHeartRate();
-
-        // Set up fallback polling after 10 seconds if no subscription updates
-        subscriptionTimeout = setTimeout(() => {
-          if (!subscriptionActive) {
-            console.log("⚠️ Subscription doesn't seem to be working, starting fallback polling...");
-            startIntelligentPolling();
-          }
-        }, 10000);
-      } catch (error) {
-        console.error("Error setting up HealthKit subscription:", error);
-        setError("Failed to set up heart rate monitoring: " + error.message);
-
-        // If subscription setup fails, start polling as fallback
-        console.log("📊 Starting fallback polling due to subscription error");
-        startIntelligentPolling();
-      }
-    })();
-
-    return () => {
-      if (typeof unsub === "function") {
-        console.log("Cleaning up subscription...");
-        unsub();
-      }
-      if (subscriptionTimeout) {
-        clearTimeout(subscriptionTimeout);
-      }
-      stopPolling();
-    };
-  }, [authStatus]);
-
-  // Monitor app state changes
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (nextAppState) => {
-      if (appStateRef.current.match(/inactive|background/) && nextAppState === "active") {
-        console.log("App has come to the foreground!");
-        // Immediately fetch latest data when coming to foreground
-        if (authStatus) {
-          getLatestHeartRate();
-        }
-      }
-      appStateRef.current = nextAppState;
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, [authStatus]);
-
-  // Intelligent polling mechanism
-  const startIntelligentPolling = () => {
-    // Clear any existing interval
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
+  // Request permissions
+  const handleRequestPermissions = useCallback(async () => {
+    setLoading(true);
+    try {
+      await healthKitStore.initialize();
+    } catch (err) {
+      console.error('Permission request failed:', err);
     }
+    setLoading(false);
+  }, []);
 
-    // Start with aggressive polling (every 5 seconds for first minute)
-    let pollCount = 0;
-    const maxAggressivePolls = 12; // 1 minute of 5-second intervals
-
-    const poll = () => {
-      if (appStateRef.current === "active") {
-        console.log(`📊 Polling for heart rate data (poll #${pollCount + 1})`);
-        getLatestHeartRate();
-
-        pollCount++;
-
-        // After initial aggressive period, switch to less frequent polling
-        if (pollCount === maxAggressivePolls) {
-          clearInterval(pollingIntervalRef.current);
-          // Switch to 30-second intervals
-          pollingIntervalRef.current = setInterval(() => {
-            if (appStateRef.current === "active") {
-              console.log("📊 Regular polling for heart rate data");
-              getLatestHeartRate();
-            }
-          }, 30000);
-        }
-      }
-    };
-
-    // Start aggressive polling
-    pollingIntervalRef.current = setInterval(poll, 5000);
-    // Do first poll immediately
-    poll();
+  // Format HealthKit date
+  const formatDate = (dateValue) => {
+    const date = parseHealthKitDate(dateValue);
+    if (!date) return 'Unknown';
+    return date.toLocaleString();
   };
 
-  // Stop polling
-  const stopPolling = () => {
-    if (pollingIntervalRef.current) {
-      clearInterval(pollingIntervalRef.current);
-      pollingIntervalRef.current = null;
+  // Format time ago
+  const getTimeAgo = (date) => {
+    if (!date) return '';
+    const dateObj = date instanceof Date ? date : parseHealthKitDate(date);
+    if (!dateObj) return '';
+    const seconds = Math.floor((Date.now() - dateObj.getTime()) / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
+  };
+
+  // Format duration
+  const formatDuration = (seconds) => {
+    if (!seconds) return '0m';
+    const mins = Math.floor(seconds / 60);
+    const hrs = Math.floor(mins / 60);
+    if (hrs > 0) {
+      return `${hrs}h ${mins % 60}m`;
     }
+    return `${mins}m`;
+  };
+
+  // Format workout type (v13: type is a number enum, not a string)
+  const formatWorkoutType = (type) => {
+    // v13 WorkoutActivityType enum values
+    const workoutNames = {
+      1: 'American Football', 2: 'Archery', 3: 'Australian Football',
+      4: 'Badminton', 5: 'Baseball', 6: 'Basketball', 7: 'Bowling',
+      8: 'Boxing', 9: 'Climbing', 10: 'Cricket', 11: 'Cross Training',
+      12: 'Curling', 13: 'Cycling', 14: 'Dance', 15: 'Dance Training',
+      16: 'Elliptical', 17: 'Equestrian', 18: 'Fencing', 19: 'Fishing',
+      20: 'Strength Training', 21: 'Golf', 22: 'Gymnastics', 23: 'Handball',
+      24: 'Hiking', 25: 'Hockey', 26: 'Hunting', 27: 'Lacrosse',
+      28: 'Martial Arts', 29: 'Mind & Body', 30: 'Mixed Cardio',
+      31: 'Paddle Sports', 32: 'Play', 33: 'Recovery', 34: 'Racquetball',
+      35: 'Rowing', 36: 'Rugby', 37: 'Running', 38: 'Sailing',
+      39: 'Skating', 40: 'Snow Sports', 41: 'Soccer', 42: 'Softball',
+      43: 'Squash', 44: 'Stair Climbing', 45: 'Surfing', 46: 'Swimming',
+      47: 'Table Tennis', 48: 'Tennis', 49: 'Track & Field',
+      50: 'Traditional Strength', 51: 'Volleyball', 52: 'Walking',
+      53: 'Water Fitness', 54: 'Water Polo', 55: 'Water Sports',
+      56: 'Wrestling', 57: 'Yoga', 58: 'Barre', 59: 'Core Training',
+      60: 'Cross Country Skiing', 61: 'Downhill Skiing', 62: 'Flexibility',
+      63: 'HIIT', 64: 'Jump Rope', 65: 'Kickboxing', 66: 'Pilates',
+      67: 'Snowboarding', 68: 'Stairs', 69: 'Step Training',
+      70: 'Wheelchair Walk', 71: 'Wheelchair Run', 72: 'Tai Chi',
+      73: 'Mixed Cardio', 74: 'Hand Cycling', 75: 'Disc Sports',
+      76: 'Fitness Gaming', 77: 'Cardio Dance', 78: 'Social Dance',
+      79: 'Pickleball', 80: 'Cooldown', 82: 'Swim Bike Run',
+      83: 'Transition', 84: 'Underwater Diving', 3000: 'Other',
+    };
+    
+    if (typeof type === 'number') {
+      return workoutNames[type] || `Workout (${type})`;
+    }
+    if (typeof type === 'string') {
+      // Fallback for string format
+      return type.replace('HKWorkoutActivityType', '').replace(/([A-Z])/g, ' $1').trim() || 'Workout';
+    }
+    return 'Workout';
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <ScrollView contentContainerStyle={styles.contentContainer}>
-        <Text style={styles.title}>HealthKit Heart Rate Monitor</Text>
+      <ScrollView 
+        contentContainerStyle={styles.contentContainer}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
+        <Text style={styles.title}>💓 Health Monitor</Text>
+        <Text style={styles.subtitle}>Heart Rate + Calories + Activities</Text>
 
-        {!authStatus ? (
-          <Button
-            title="Request HealthKit Permissions"
-            onPress={requestPermissions}
-            disabled={loading}
-          />
+        {/* Status Indicator */}
+        <View style={styles.statusContainer}>
+          <View style={[
+            styles.statusIndicator,
+            { backgroundColor: subscriptionActive ? '#4CAF50' : '#FFC107' }
+          ]} />
+          <Text style={styles.statusText}>
+            {subscriptionActive 
+              ? `Live Updates Active (${updateCount} events)` 
+              : 'Waiting for updates...'}
+          </Text>
+        </View>
+
+        {!isAuthorized ? (
+          <View style={styles.permissionBox}>
+            <Text style={styles.permissionText}>
+              HealthKit permissions required for:
+            </Text>
+            <Text style={styles.permissionList}>• Heart Rate</Text>
+            <Text style={styles.permissionList}>• Active Energy (Calories)</Text>
+            <Text style={styles.permissionList}>• Workouts</Text>
+            <View style={{ marginTop: 15 }}>
+              <Button
+                title="Grant Permissions"
+                onPress={handleRequestPermissions}
+                disabled={loading}
+              />
+            </View>
+          </View>
         ) : (
           <>
-            <Text style={styles.subtitle}>Heart Rate Data</Text>
-
-            {/* Subscription Status Indicator */}
-            <View style={styles.statusContainer}>
-              <View
-                style={[
-                  styles.statusIndicator,
-                  { backgroundColor: subscriptionActive ? "#4CAF50" : "#FFC107" },
-                ]}
-              />
-              <Text style={styles.statusText}>
-                {subscriptionActive ? "Live Updates Active" : "Polling Mode (Subscription Issue)"}
-              </Text>
-            </View>
-
-            {loading ? (
-              <ActivityIndicator size="large" color="#0000ff" />
-            ) : heartRate ? (
-              <View style={styles.dataContainer}>
-                <Text style={styles.heartRateValue}>
-                  {heartRate?.quantity?.toFixed(0) ?? 0} BPM
+            {/* Current Stats Row */}
+            <View style={styles.statsRow}>
+              {/* Heart Rate Card */}
+              <View style={[styles.statCard, styles.hrCard]}>
+                <Text style={styles.statIcon}>💓</Text>
+                <Text style={styles.statValue}>
+                  {heartRate?.quantity?.toFixed(0) || '--'}
                 </Text>
-                <Text style={styles.dateText}>
-                  Measured: {new Date(heartRate.startDate).toLocaleString()}
-                </Text>
-                <Text style={styles.sourceText}>
-                  Source: {heartRate.sourceRevision?.source?.name || "Unknown"}
-                </Text>
-                {lastUpdateTime && (
-                  <Text style={styles.updateText}>
-                    Last Update:{" "}
-                    {new Date().getTime() - lastUpdateTime.getTime() < 60000
-                      ? `${Math.floor(
-                          (new Date().getTime() - lastUpdateTime.getTime()) / 1000
-                        )}s ago`
-                      : `${Math.floor(
-                          (new Date().getTime() - lastUpdateTime.getTime()) / 60000
-                        )}m ago`}
-                  </Text>
+                <Text style={styles.statUnit}>BPM</Text>
+                {lastHeartRateUpdate && (
+                  <Text style={styles.statTime}>{getTimeAgo(lastHeartRateUpdate)}</Text>
                 )}
               </View>
-            ) : (
-              <Text style={styles.noData}>No heart rate data available</Text>
+
+              {/* Calories Card */}
+              <View style={[styles.statCard, styles.calCard]}>
+                <Text style={styles.statIcon}>🔥</Text>
+                <Text style={styles.statValue}>
+                  {activeCalories?.quantity?.toFixed(0) || '--'}
+                </Text>
+                <Text style={styles.statUnit}>kcal</Text>
+                {lastCaloriesUpdate && (
+                  <Text style={styles.statTime}>{getTimeAgo(lastCaloriesUpdate)}</Text>
+                )}
+              </View>
+            </View>
+
+            {/* Refresh Button */}
+            <View style={styles.buttonContainer}>
+              <Button
+                title={loading ? "Refreshing..." : "🔄 Refresh Data"}
+                onPress={handleRefresh}
+                disabled={loading}
+              />
+            </View>
+
+            {/* Recent Activities */}
+            <View style={styles.activitiesContainer}>
+              <Text style={styles.sectionTitle}>📊 Recent Activities (Last 5)</Text>
+              
+              {recentActivities.length === 0 ? (
+                <View style={styles.noActivities}>
+                  <Text style={styles.noActivitiesText}>No recent workouts found</Text>
+                  <Text style={styles.noActivitiesHint}>
+                    Complete a workout on your Apple Watch to see it here
+                  </Text>
+                </View>
+              ) : (
+                recentActivities.map((activity, index) => (
+                  <View key={activity.id || index} style={styles.activityCard}>
+                    <View style={styles.activityHeader}>
+                      <Text style={styles.activityType}>
+                        {formatWorkoutType(activity.workoutType)}
+                      </Text>
+                      <Text style={styles.activityDate}>
+                        {getTimeAgo(activity.startDate)}
+                      </Text>
+                    </View>
+                    
+                    <View style={styles.activityStats}>
+                      <View style={styles.activityStat}>
+                        <Text style={styles.activityStatLabel}>Duration</Text>
+                        <Text style={styles.activityStatValue}>
+                          {formatDuration(activity.duration)}
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.activityStat}>
+                        <Text style={styles.activityStatLabel}>Calories</Text>
+                        <Text style={[styles.activityStatValue, styles.caloriesText]}>
+                          {activity.totalEnergyBurned?.toFixed(0) || '--'} kcal
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.activityStat}>
+                        <Text style={styles.activityStatLabel}>Avg HR</Text>
+                        <Text style={[styles.activityStatValue, styles.hrText]}>
+                          {activity.avgHeartRate || '--'} BPM
+                        </Text>
+                      </View>
+                      
+                      <View style={styles.activityStat}>
+                        <Text style={styles.activityStatLabel}>Max HR</Text>
+                        <Text style={[styles.activityStatValue, styles.hrText]}>
+                          {activity.maxHeartRate || '--'} BPM
+                        </Text>
+                      </View>
+                    </View>
+                    
+                    <Text style={styles.activitySource}>
+                      📱 {activity.source}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </View>
+
+            {/* Debug Toggle */}
+            <View style={styles.buttonContainer}>
+              <Button
+                title={showDebug ? "Hide Debug Info" : "Show Debug Info"}
+                onPress={() => setShowDebug(!showDebug)}
+                color="#666"
+              />
+            </View>
+
+            {/* Debug Info */}
+            {showDebug && (
+              <View style={styles.debugContainer}>
+                <Text style={styles.debugTitle}>🔧 Debug Info</Text>
+                <Text style={styles.debugText}>HR Type: {HEART_RATE_TYPE}</Text>
+                <Text style={styles.debugText}>Cal Type: {ACTIVE_ENERGY_TYPE}</Text>
+                <Text style={styles.debugText}>Authorized: {isAuthorized ? '✅' : '❌'}</Text>
+                <Text style={styles.debugText}>Subscription: {subscriptionActive ? '✅' : '❌'}</Text>
+                <Text style={styles.debugText}>Update Events: {updateCount}</Text>
+                <Text style={styles.debugText}>Activities: {recentActivities.length}</Text>
+                <Text style={styles.debugText}>
+                  Last HR: {lastHeartRateUpdate?.toLocaleString() || 'Never'}
+                </Text>
+                <Text style={styles.debugText}>
+                  Last Cal: {lastCaloriesUpdate?.toLocaleString() || 'Never'}
+                </Text>
+                <Text style={styles.debugHint}>
+                  💡 Check Xcode/Metro console for [HealthKitSetup] logs
+                </Text>
+              </View>
             )}
-
-            <Button
-              title="Refresh Heart Rate"
-              onPress={getLatestHeartRate}
-              disabled={loading}
-              style={styles.refreshButton}
-            />
-
-            <Button
-              title="Force Sync from Watch"
-              onPress={forceSyncHealthKit}
-              disabled={loading}
-              color="#FF6B35"
-            />
-
-            <Button
-              title="Check Watch Status"
-              onPress={checkWatchStatus}
-              disabled={loading}
-              color="#8A2BE2"
-            />
-
-            <Button
-              title={pollingIntervalRef.current ? "Stop Polling" : "Start Manual Polling"}
-              onPress={() => {
-                if (pollingIntervalRef.current) {
-                  console.log("🛑 Stopping manual polling");
-                  stopPolling();
-                } else {
-                  console.log("▶️ Starting manual polling");
-                  startIntelligentPolling();
-                }
-              }}
-              disabled={loading}
-              color="#FF9800"
-            />
           </>
         )}
 
-        {error && <Text style={styles.errorText}>{error}</Text>}
+        {/* Error Display */}
+        {error && (
+          <View style={styles.errorContainer}>
+            <Text style={styles.errorText}>❌ {error}</Text>
+          </View>
+        )}
 
         <StatusBar style="auto" />
       </ScrollView>
@@ -429,79 +333,221 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#fff",
+    backgroundColor: '#f0f4f8',
   },
   contentContainer: {
-    padding: 20,
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "100%",
+    padding: 16,
   },
   title: {
-    fontSize: 24,
-    fontWeight: "bold",
-    marginBottom: 20,
+    fontSize: 28,
+    fontWeight: 'bold',
+    textAlign: 'center',
+    color: '#1a1a2e',
   },
   subtitle: {
-    fontSize: 18,
-    marginTop: 20,
-    marginBottom: 10,
-  },
-  dataContainer: {
-    alignItems: "center",
-    marginVertical: 20,
-    padding: 20,
-    borderRadius: 10,
-    backgroundColor: "#f0f0f0",
-    width: "100%",
-  },
-  heartRateValue: {
-    fontSize: 40,
-    fontWeight: "bold",
-    color: "#FF5733",
-  },
-  dateText: {
-    marginTop: 10,
-    color: "#666",
-  },
-  sourceText: {
-    marginTop: 5,
-    color: "#666",
-    fontStyle: "italic",
-  },
-  noData: {
-    fontSize: 16,
-    fontStyle: "italic",
-    color: "#666",
-    marginVertical: 20,
-  },
-  refreshButton: {
-    marginTop: 20,
-  },
-  errorText: {
-    color: "red",
-    marginTop: 20,
-    textAlign: "center",
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 16,
   },
   statusContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 15,
-    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+    marginBottom: 16,
   },
   statusIndicator: {
     width: 10,
     height: 10,
     borderRadius: 5,
-    marginRight: 8,
+    marginRight: 10,
   },
   statusText: {
-    fontSize: 14,
-    color: "#666",
+    fontSize: 13,
+    color: '#333',
   },
-  updateText: {
+  permissionBox: {
+    padding: 24,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    alignItems: 'center',
+  },
+  permissionText: {
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 12,
+    color: '#333',
+  },
+  permissionList: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 4,
+  },
+  statsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  statCard: {
+    flex: 1,
+    padding: 20,
+    borderRadius: 16,
+    alignItems: 'center',
+    marginHorizontal: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  hrCard: {
+    backgroundColor: '#ffe8e8',
+  },
+  calCard: {
+    backgroundColor: '#fff3e0',
+  },
+  statIcon: {
+    fontSize: 32,
+    marginBottom: 8,
+  },
+  statValue: {
+    fontSize: 36,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  statUnit: {
+    fontSize: 14,
+    color: '#666',
+    marginTop: 2,
+  },
+  statTime: {
+    fontSize: 11,
+    color: '#888',
+    marginTop: 6,
+  },
+  buttonContainer: {
+    marginBottom: 12,
+  },
+  activitiesContainer: {
+    marginTop: 8,
+    marginBottom: 16,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    marginBottom: 12,
+    color: '#333',
+  },
+  noActivities: {
+    padding: 24,
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  noActivitiesText: {
+    fontSize: 16,
+    color: '#666',
+  },
+  noActivitiesHint: {
     fontSize: 12,
-    color: "#888",
-    marginTop: 5,
+    color: '#888',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  activityCard: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  activityHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  activityType: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  activityDate: {
+    fontSize: 12,
+    color: '#888',
+  },
+  activityStats: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+  },
+  activityStat: {
+    width: '48%',
+    marginBottom: 10,
+  },
+  activityStatLabel: {
+    fontSize: 11,
+    color: '#888',
+    textTransform: 'uppercase',
+  },
+  activityStatValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    marginTop: 2,
+  },
+  hrText: {
+    color: '#e53935',
+  },
+  caloriesText: {
+    color: '#ff6d00',
+  },
+  activitySource: {
+    fontSize: 11,
+    color: '#aaa',
+    marginTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#f0f0f0',
+    paddingTop: 8,
+  },
+  debugContainer: {
+    padding: 16,
+    backgroundColor: '#e8e8e8',
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  debugTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    marginBottom: 10,
+    color: '#333',
+  },
+  debugText: {
+    fontSize: 11,
+    color: '#555',
+    marginBottom: 3,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  debugHint: {
+    fontSize: 10,
+    color: '#888',
+    marginTop: 10,
+    fontStyle: 'italic',
+  },
+  errorContainer: {
+    padding: 16,
+    backgroundColor: '#ffebee',
+    borderRadius: 12,
+    marginTop: 12,
+  },
+  errorText: {
+    color: '#c62828',
+    fontSize: 14,
   },
 });
